@@ -46,7 +46,10 @@ function valueAfter(
   fallback: string | undefined,
 ): string | undefined {
   const index = args.indexOf(flag);
-  return index >= 0 && index + 1 < args.length ? args[index + 1] : fallback;
+  if (index < 0) return fallback;
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+  return value;
 }
 
 function stripKnown(args: string[], known: Set<string>): string[] {
@@ -104,6 +107,9 @@ async function main(argv: string[]): Promise<number> {
         "--json",
       ]),
     );
+    const unknownArg = args.find((arg) => arg.startsWith("-"));
+    if (unknownArg) throw new Error(`Unknown create argument: ${unknownArg}`);
+    if (args.length > 1) throw new Error(`Unexpected extra profile name: ${args[1]}`);
     const result = createProfile(args[0], {
       home,
       template: valueAfter(rest, "--template", undefined),
@@ -117,7 +123,13 @@ async function main(argv: string[]): Promise<number> {
       ownAuth: has(rest, "--own-auth"),
       ownModels: has(rest, "--own-models"),
     });
-    print(json ? result : `Created profile ${result.name} at ${result.dir}`, json);
+    const from = valueAfter(rest, "--from", undefined);
+    print(
+      json
+        ? result
+        : `Created profile ${result.name} at ${result.dir}\nConfiguration: inherited from ${from ? `profile ${from}` : "main Pi"}\nTemplate: ${result.template}\nMemory: ${result.memory ? "enabled" : "disabled"}\nAuth: ${result.auth}\nModels: ${result.models}`,
+      json,
+    );
     if (!json && result.auth === "own") console.log(`Run: pi-profile ${result.name} /login`);
     return 0;
   }

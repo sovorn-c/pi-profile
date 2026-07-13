@@ -29,6 +29,23 @@ const SETTINGS = {
   sessionDir: "sessions",
 };
 
+// Keep the default profile lightweight: copy native configuration and loose
+// resources, while allowing Pi to restore package-managed resources declared in
+// settings.json on first launch instead of duplicating npm/git installations.
+const BASE_OPERATIONAL_ENTRIES = [
+  "settings.json",
+  "keybindings.json",
+  "extensions",
+  "skills",
+  "prompts",
+  "themes",
+  "tools",
+  "bin",
+] as const;
+
+const IDENTITY_FILES = ["AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md"] as const;
+const PROFILE_CONFIGURATION_ENTRIES = [...BASE_OPERATIONAL_ENTRIES, ...IDENTITY_FILES] as const;
+
 const MEMORY_FILES = {
   "USER.md": "# User Memory\n\nStore durable user preferences here. Keep entries short and actionable.\n",
   "HINDSIGHT.md":
@@ -142,11 +159,6 @@ export interface LaunchSpec {
   profile: ResolvedProfile;
 }
 
-interface CopyTreeOptions {
-  exclude?: Set<string>;
-  excludeDirs?: Set<string>;
-}
-
 function isTemplateName(value: string): value is TemplateName {
   return Object.hasOwn(TEMPLATES, value);
 }
@@ -187,26 +199,75 @@ function ensureInside(child: string, parent: string): void {
   }
 }
 
-function writeFileIfMissing(file: string, content: string): void {
-  if (!fs.existsSync(file)) fs.writeFileSync(file, content);
+function writeFileIfMissing(file: string, content: string, mode?: number): void {
+  if (!fs.existsSync(file)) fs.writeFileSync(file, content, mode === undefined ? undefined : { mode });
 }
 
 function copyFileIfMissing(source: fs.PathLike, destination: string): void {
   if (!fs.existsSync(destination)) fs.copyFileSync(source, destination);
 }
 
-function copyTree(src: string, dest: string, options: CopyTreeOptions = {}): void {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (options.exclude?.has(entry.name)) continue;
-    const source = path.join(src, entry.name);
-    const target = path.join(dest, entry.name);
-    if (entry.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(source), target);
-    else if (entry.isDirectory()) {
-      if (options.excludeDirs?.has(entry.name)) fs.mkdirSync(target, { recursive: true });
-      else copyTree(source, target, options);
-    } else fs.copyFileSync(source, target);
+function ensureProfileSettings(dir: string): void {
+  const file = path.join(dir, "settings.json");
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, `${JSON.stringify(SETTINGS, null, 2)}\n`);
+    return;
   }
+  let settings: Record<string, unknown>;
+  try {
+    const value = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    settings = value as Record<string, unknown>;
+  } catch {
+    throw new Error(`Invalid settings.json inherited from ${file}`);
+  }
+  settings.sessionDir = "sessions";
+  fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+function copyPath(source: string, target: string): void {
+  const stat = fs.lstatSync(source);
+  if (stat.isSymbolicLink()) {
+    fs.symlinkSync(fs.readlinkSync(source), target);
+  } else if (stat.isDirectory()) {
+    copyTree(source, target);
+  } else {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
+}
+
+function copyTree(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src)) {
+    copyPath(path.join(src, entry), path.join(dest, entry));
+  }
+}
+
+function copySelectedEntries(source: string, destination: string, entries: readonly string[]): void {
+  for (const entry of entries) {
+    const sourcePath = path.join(source, entry);
+    if (!fs.existsSync(sourcePath)) continue;
+    const targetPath = path.join(destination, entry);
+    const stat = fs.lstatSync(sourcePath);
+    // Materialize selected top-level links so profile setup and later edits cannot
+    // write through a linked extensions/skills directory into the source profile.
+    if (stat.isSymbolicLink()) {
+      const targetStat = fs.statSync(sourcePath);
+      if (targetStat.isDirectory()) copyTree(fs.realpathSync(sourcePath), targetPath);
+      else fs.copyFileSync(sourcePath, targetPath);
+    } else {
+      copyPath(sourcePath, targetPath);
+    }
+  }
+}
+
+function applyTemplate(dir: string, templateName: TemplateName): void {
+  for (const file of IDENTITY_FILES) fs.rmSync(path.join(dir, file), { force: true });
+  if (templateName === "blank") return;
+  const template = TEMPLATES[templateName];
+  fs.writeFileSync(path.join(dir, "AGENTS.md"), template.agents);
+  fs.writeFileSync(path.join(dir, "APPEND_SYSTEM.md"), template.append);
 }
 
 function linkOrCopy(src: string, dest: string): FileMode {
@@ -259,78 +320,103 @@ export function createProfile(
   ensureInside(dir, profilePaths.profilesDir);
   if (fs.existsSync(dir)) throw new Error(`Profile already exists: ${name}`);
   if (opts.from && opts.fromBase) throw new Error("Cannot use both --from and --from-base");
+  if (opts.cloneAll && !opts.from && !opts.fromBase) {
+    throw new Error("--clone-all requires --from or --from-base");
+  }
+  if (opts.workspace) {
+    const workspace = path.resolve(opts.workspace);
+    if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
+      throw new Error(`Workspace does not exist or is not a directory: ${workspace}`);
+    }
+  }
 
-  const source = opts.from
-    ? resolveProfileArg(opts.from, { home }).dir
-    : opts.fromBase
-      ? profilePaths.baseAgentDir
-      : null;
-  const sourceMetadata = opts.from ? readProfileMetadata(opts.from, { home }) : null;
+  const sourceProfile = opts.from ? resolveProfileArg(opts.from, { home }) : null;
+  const source = sourceProfile?.dir || profilePaths.baseAgentDir;
+  const sourceMetadata = sourceProfile ? readProfileMetadata(sourceProfile.name, { home }) : null;
   const requestedTemplate = opts.template || sourceMetadata?.template || "blank";
   if (!isTemplateName(requestedTemplate)) throw new Error(`Unknown template: ${requestedTemplate}`);
   const templateName = requestedTemplate;
 
-  fs.mkdirSync(dir, { recursive: true });
-  if (source && fs.existsSync(source)) {
-    copyTree(source, dir, {
-      excludeDirs: new Set(["sessions", "memory"]),
-      exclude: new Set(["auth.json", "models.json", "profile.json"]),
-    });
-    fs.mkdirSync(path.join(dir, "sessions"), { recursive: true });
+  fs.mkdirSync(profilePaths.profilesDir, { recursive: true, mode: 0o700 });
+  const stagingDir = fs.mkdtempSync(path.join(profilePaths.profilesDir, `.${name}-`));
+  fs.chmodSync(stagingDir, 0o700);
+
+  let authMode: FileMode = "skipped";
+  let modelsMode: FileMode = "skipped";
+  try {
+    if (fs.existsSync(source)) {
+      copySelectedEntries(
+        source,
+        stagingDir,
+        sourceProfile ? PROFILE_CONFIGURATION_ENTRIES : BASE_OPERATIONAL_ENTRIES,
+      );
+    }
+
+    for (const sub of ["skills", "prompts", "extensions", "tools", "themes", "sessions"]) {
+      fs.mkdirSync(path.join(stagingDir, sub), { recursive: true });
+    }
+    ensureProfileSettings(stagingDir);
+
+    // A template is an identity overlay, not a resource bundle. Cloning another
+    // profile preserves its instructions unless the user explicitly selects a
+    // template; fresh profiles never inherit main Pi's identity files.
+    if (opts.template) applyTemplate(stagingDir, templateName);
+
     if (opts.cloneAll) {
       const sourceMemory = path.join(source, "memory");
-      if (fs.existsSync(sourceMemory)) copyTree(sourceMemory, path.join(dir, "memory"));
-      const sourceProfile = path.join(source, "profile.json");
-      if (fs.existsSync(sourceProfile)) fs.copyFileSync(sourceProfile, path.join(dir, "profile.json"));
+      if (fs.existsSync(sourceMemory)) copyTree(sourceMemory, path.join(stagingDir, "memory"));
     }
-  }
 
-  for (const sub of ["skills", "prompts", "extensions", "tools", "themes", "sessions"]) {
-    fs.mkdirSync(path.join(dir, sub), { recursive: true });
-  }
-  writeFileIfMissing(path.join(dir, "settings.json"), `${JSON.stringify(SETTINGS, null, 2)}\n`);
-
-  if (opts.template && opts.template !== "blank" && !source) {
-    const template = TEMPLATES[templateName];
-    writeFileIfMissing(path.join(dir, "AGENTS.md"), template.agents);
-    writeFileIfMissing(path.join(dir, "APPEND_SYSTEM.md"), template.append);
-  }
-
-  const memoryExtension = path.join(dir, "extensions", "pi-profile-memory.ts");
-  const legacyMemoryExtension = path.join(dir, "extensions", "pi-profile-memory.js");
-  if (opts.memory !== false) {
-    fs.mkdirSync(path.join(dir, "memory"), { recursive: true });
-    for (const [file, content] of Object.entries(MEMORY_FILES)) {
-      writeFileIfMissing(path.join(dir, "memory", file), content);
+    const memoryExtension = path.join(stagingDir, "extensions", "pi-profile-memory.ts");
+    const legacyMemoryExtension = path.join(stagingDir, "extensions", "pi-profile-memory.js");
+    if (opts.memory !== false) {
+      const memoryPath = path.join(stagingDir, "memory");
+      fs.mkdirSync(memoryPath, { recursive: true, mode: 0o700 });
+      fs.chmodSync(memoryPath, 0o700);
+      for (const [file, content] of Object.entries(MEMORY_FILES)) {
+        const memoryFile = path.join(memoryPath, file);
+        writeFileIfMissing(memoryFile, content, 0o600);
+        fs.chmodSync(memoryFile, 0o600);
+      }
+      fs.rmSync(legacyMemoryExtension, { force: true });
+      copyFileIfMissing(MEMORY_EXTENSION_SOURCE, memoryExtension);
+    } else {
+      fs.rmSync(path.join(stagingDir, "memory"), { recursive: true, force: true });
+      fs.rmSync(memoryExtension, { force: true });
+      fs.rmSync(legacyMemoryExtension, { force: true });
     }
-    fs.rmSync(legacyMemoryExtension, { force: true });
-    copyFileIfMissing(MEMORY_EXTENSION_SOURCE, memoryExtension);
-  } else {
-    fs.rmSync(path.join(dir, "memory"), { recursive: true, force: true });
-    fs.rmSync(memoryExtension, { force: true });
-    fs.rmSync(legacyMemoryExtension, { force: true });
+
+    const metadataOpts: CreateProfileOptions = {
+      ...opts,
+      description: opts.description ?? sourceMetadata?.description,
+      workspace: opts.workspace ?? sourceMetadata?.workspace ?? undefined,
+    };
+    fs.writeFileSync(
+      path.join(stagingDir, "profile.json"),
+      `${JSON.stringify(profileMetadata(name, templateName, metadataOpts), null, 2)}\n`,
+    );
+
+    const authDest = path.join(stagingDir, "auth.json");
+    const modelsDest = path.join(stagingDir, "models.json");
+    authMode = opts.ownAuth
+      ? "own"
+      : linkOrCopy(path.join(profilePaths.baseAgentDir, "auth.json"), authDest);
+    modelsMode = opts.ownModels
+      ? "own"
+      : linkOrCopy(path.join(profilePaths.baseAgentDir, "models.json"), modelsDest);
+    if (opts.ownAuth && !fs.existsSync(authDest)) {
+      fs.writeFileSync(authDest, "{}\n", { mode: 0o600 });
+    }
+    if (opts.ownModels && !fs.existsSync(modelsDest)) {
+      fs.writeFileSync(modelsDest, "{}\n", { mode: 0o600 });
+    }
+
+    if (fs.existsSync(dir)) throw new Error(`Profile already exists: ${name}`);
+    fs.renameSync(stagingDir, dir);
+  } catch (error) {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw error;
   }
-
-  const metadataOpts: CreateProfileOptions = {
-    ...opts,
-    description: opts.description ?? sourceMetadata?.description,
-    workspace: opts.workspace ?? sourceMetadata?.workspace ?? undefined,
-  };
-  fs.writeFileSync(
-    path.join(dir, "profile.json"),
-    `${JSON.stringify(profileMetadata(name, templateName, metadataOpts), null, 2)}\n`,
-  );
-
-  const authDest = path.join(dir, "auth.json");
-  const modelsDest = path.join(dir, "models.json");
-  const authMode: FileMode = opts.ownAuth
-    ? "own"
-    : linkOrCopy(path.join(profilePaths.baseAgentDir, "auth.json"), authDest);
-  const modelsMode: FileMode = opts.ownModels
-    ? "own"
-    : linkOrCopy(path.join(profilePaths.baseAgentDir, "models.json"), modelsDest);
-  if (opts.ownAuth && !fs.existsSync(authDest)) fs.writeFileSync(authDest, "{}\n");
-  if (opts.ownModels && !fs.existsSync(modelsDest)) fs.writeFileSync(modelsDest, "{}\n");
 
   return {
     name,

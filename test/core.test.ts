@@ -33,6 +33,130 @@ test('creates profile with template, layout, settings and memory files', () => {
   assert.match(fs.readFileSync(path.join(dir, 'memory', 'HINDSIGHT.md'), 'utf8'), /Hindsight/);
 });
 
+test('default creation inherits main Pi configuration but starts with fresh identity and state', () => {
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  const inheritedSettings = {
+    defaultProvider: 'anthropic',
+    defaultModel: 'claude-sonnet',
+    defaultThinkingLevel: 'medium',
+    packages: ['npm:example-package'],
+    skills: ['skills'],
+    extensions: ['extensions'],
+    sessionDir: '/tmp/main-pi-sessions'
+  };
+  fs.writeFileSync(path.join(agent, 'settings.json'), `${JSON.stringify(inheritedSettings)}\n`);
+  fs.writeFileSync(path.join(agent, 'keybindings.json'), '{"app.quit":"ctrl+q"}\n');
+  for (const [sub, file] of [
+    ['extensions', 'main-extension.ts'],
+    ['skills', 'main-skill.md'],
+    ['prompts', 'review.md'],
+    ['themes', 'custom.json'],
+    ['tools', 'helper.json'],
+    ['bin', 'helper']
+  ]) {
+    const dir = path.join(agent, sub);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, file), sub);
+  }
+  fs.mkdirSync(path.join(agent, 'npm', 'large-package'), { recursive: true });
+  fs.writeFileSync(path.join(agent, 'npm', 'large-package', 'marker'), 'package cache');
+  fs.writeFileSync(path.join(agent, 'AGENTS.md'), 'main identity');
+  fs.writeFileSync(path.join(agent, 'SYSTEM.md'), 'main system prompt');
+  fs.writeFileSync(path.join(agent, 'APPEND_SYSTEM.md'), 'main appended prompt');
+  fs.writeFileSync(path.join(agent, 'trust.json'), '{"/project":"trusted"}\n');
+  fs.mkdirSync(path.join(agent, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(agent, 'sessions', 'old.jsonl'), 'old session');
+  fs.mkdirSync(path.join(agent, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(agent, 'memory', 'USER.md'), 'main memory');
+
+  const profile = createProfile('work', { home });
+  assert.deepEqual(readJson(path.join(profile.dir, 'settings.json')), {
+    ...inheritedSettings,
+    sessionDir: 'sessions'
+  });
+  assert.deepEqual(readJson(path.join(profile.dir, 'keybindings.json')), { 'app.quit': 'ctrl+q' });
+  for (const [sub, file] of [
+    ['extensions', 'main-extension.ts'],
+    ['skills', 'main-skill.md'],
+    ['prompts', 'review.md'],
+    ['themes', 'custom.json'],
+    ['tools', 'helper.json'],
+    ['bin', 'helper']
+  ]) {
+    assert.equal(fs.readFileSync(path.join(profile.dir, sub, file), 'utf8'), sub);
+  }
+  assert.equal(fs.existsSync(path.join(profile.dir, 'npm')), false);
+  for (const file of ['AGENTS.md', 'SYSTEM.md', 'APPEND_SYSTEM.md', 'trust.json']) {
+    assert.equal(fs.existsSync(path.join(profile.dir, file)), false);
+  }
+  assert.deepEqual(fs.readdirSync(path.join(profile.dir, 'sessions')), []);
+  assert.doesNotMatch(fs.readFileSync(path.join(profile.dir, 'memory', 'USER.md'), 'utf8'), /main memory/);
+
+  fs.rmSync(path.join(profile.dir, 'extensions', 'main-extension.ts'));
+  assert.equal(fs.existsSync(path.join(agent, 'extensions', 'main-extension.ts')), true);
+});
+
+test('materializes linked top-level resources so profile changes stay isolated', () => {
+  if (process.platform === 'win32') return;
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  const sharedExtensions = path.join(home, 'shared-extensions');
+  fs.mkdirSync(sharedExtensions);
+  fs.writeFileSync(path.join(sharedExtensions, 'shared.ts'), 'shared resource');
+  fs.symlinkSync(sharedExtensions, path.join(agent, 'extensions'));
+
+  const profile = createProfile('isolated', { home });
+  assert.equal(fs.lstatSync(path.join(profile.dir, 'extensions')).isSymbolicLink(), false);
+  assert.equal(fs.readFileSync(path.join(profile.dir, 'extensions', 'shared.ts'), 'utf8'), 'shared resource');
+  assert.equal(fs.existsSync(path.join(sharedExtensions, 'pi-profile-memory.ts')), false);
+  fs.writeFileSync(path.join(profile.dir, 'extensions', 'shared.ts'), 'profile resource');
+  assert.equal(fs.readFileSync(path.join(sharedExtensions, 'shared.ts'), 'utf8'), 'shared resource');
+});
+
+test('templates replace inherited identity without changing inherited resources', () => {
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  fs.writeFileSync(path.join(agent, 'AGENTS.md'), 'main identity');
+  fs.writeFileSync(path.join(agent, 'SYSTEM.md'), 'main system prompt');
+  fs.writeFileSync(path.join(agent, 'APPEND_SYSTEM.md'), 'main append');
+  fs.mkdirSync(path.join(agent, 'extensions'), { recursive: true });
+  fs.writeFileSync(path.join(agent, 'extensions', 'shared.ts'), 'shared resource');
+
+  const profile = createProfile('coder', { home, template: 'coding' });
+  assert.match(fs.readFileSync(path.join(profile.dir, 'AGENTS.md'), 'utf8'), /focused coding agent/);
+  assert.doesNotMatch(fs.readFileSync(path.join(profile.dir, 'AGENTS.md'), 'utf8'), /main identity/);
+  assert.equal(fs.existsSync(path.join(profile.dir, 'SYSTEM.md')), false);
+  assert.match(fs.readFileSync(path.join(profile.dir, 'APPEND_SYSTEM.md'), 'utf8'), /correctness/);
+  assert.equal(fs.readFileSync(path.join(profile.dir, 'extensions', 'shared.ts'), 'utf8'), 'shared resource');
+});
+
+test('profile clones preserve identity unless an explicit template replaces it', () => {
+  const home = tempHome();
+  const source = createProfile('source', { home, template: 'coding' });
+  fs.writeFileSync(path.join(source.dir, 'AGENTS.md'), 'custom source identity');
+  fs.writeFileSync(path.join(source.dir, 'SYSTEM.md'), 'custom source system');
+  fs.writeFileSync(path.join(source.dir, 'trust.json'), '{"/project":"trusted"}\n');
+  fs.mkdirSync(path.join(source.dir, 'npm', 'large-package'), { recursive: true });
+  fs.writeFileSync(path.join(source.dir, 'npm', 'large-package', 'marker'), 'package cache');
+
+  const preserved = createProfile('preserved', { home, from: 'source' });
+  assert.equal(fs.readFileSync(path.join(preserved.dir, 'AGENTS.md'), 'utf8'), 'custom source identity');
+  assert.equal(fs.readFileSync(path.join(preserved.dir, 'SYSTEM.md'), 'utf8'), 'custom source system');
+  assert.equal(readJson<{ template: string }>(path.join(preserved.dir, 'profile.json')).template, 'coding');
+  assert.equal(fs.existsSync(path.join(preserved.dir, 'trust.json')), false);
+  assert.equal(fs.existsSync(path.join(preserved.dir, 'npm')), false);
+
+  const blank = createProfile('blank-clone', { home, from: 'source', template: 'blank' });
+  for (const file of ['AGENTS.md', 'SYSTEM.md', 'APPEND_SYSTEM.md']) {
+    assert.equal(fs.existsSync(path.join(blank.dir, file)), false);
+  }
+
+  const research = createProfile('research-clone', { home, from: 'source', template: 'research' });
+  assert.match(fs.readFileSync(path.join(research.dir, 'AGENTS.md'), 'utf8'), /careful research agent/);
+  assert.equal(fs.existsSync(path.join(research.dir, 'SYSTEM.md')), false);
+});
+
 test('validates names and rejects traversal/reserved command names', () => {
   for (const good of ['coder', 'research_1', 'x.y-z']) assert.equal(validateName(good), good);
   for (const bad of ['', '../x', 'a/b', 'a\\b', '~me', 'a..b', 'create', 'list', 'bad name']) {
@@ -118,6 +242,39 @@ test('clone creates fresh state and clone-all copies memory', () => {
   assert.equal(fs.existsSync(path.join(noMemory.dir, 'extensions', 'pi-profile-memory.js')), false);
 });
 
+test('creation is atomic when inherited configuration is invalid', () => {
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  fs.writeFileSync(path.join(agent, 'settings.json'), '{invalid json');
+  assert.throws(() => createProfile('broken', { home }), /Invalid settings.json/);
+  const profiles = path.join(home, '.pi', 'profiles');
+  assert.equal(fs.existsSync(path.join(profiles, 'broken')), false);
+  assert.deepEqual(fs.readdirSync(profiles), []);
+});
+
+test('validates advanced creation option combinations and workspace paths', () => {
+  const home = tempHome();
+  assert.throws(() => createProfile('bad-clone', { home, cloneAll: true }), /requires --from/);
+  assert.throws(() => createProfile('bad-source', { home, from: 'x', fromBase: true }), /Cannot use both/);
+  assert.throws(
+    () => createProfile('bad-workspace', { home, workspace: path.join(home, 'missing') }),
+    /Workspace does not exist/,
+  );
+  assert.equal(fs.existsSync(path.join(home, '.pi', 'profiles', 'bad-workspace')), false);
+});
+
+test('uses private permissions for profile state on POSIX systems', () => {
+  const home = tempHome();
+  const profile = createProfile('private', { home, ownAuth: true, ownModels: true });
+  if (process.platform === 'win32') return;
+  const mode = (target: string) => fs.statSync(target).mode & 0o777;
+  assert.equal(mode(profile.dir), 0o700);
+  assert.equal(mode(path.join(profile.dir, 'memory')), 0o700);
+  assert.equal(mode(path.join(profile.dir, 'auth.json')), 0o600);
+  assert.equal(mode(path.join(profile.dir, 'models.json')), 0o600);
+  assert.equal(mode(path.join(profile.dir, 'memory', 'USER.md')), 0o600);
+});
+
 test('workspace metadata is resolved and used by launch spec', () => {
   const home = tempHome();
   const workspace = path.join(home, 'workspace');
@@ -146,6 +303,21 @@ test('delete requires --force and clears default', () => {
   assert.deepEqual(result, { deleted: 'coder' });
   assert.equal(fs.existsSync(path.join(home, '.pi', 'profiles', 'coder')), false);
   assert.equal(getDefaultProfile({ home }), null);
+});
+
+test('cli rejects missing option values and unknown create arguments', () => {
+  const home = tempHome();
+  const cli = path.resolve('dist/cli.js');
+  let result = spawnSync(process.execPath, [cli, 'create', 'coder', '--template'], {
+    cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8'
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--template requires a value/);
+  result = spawnSync(process.execPath, [cli, 'create', '--unknown'], {
+    cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8'
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown create argument/);
 });
 
 test('cli emits json and forwards default profile args to pi', () => {

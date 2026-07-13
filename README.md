@@ -42,10 +42,10 @@ Requirements: Node.js 18+ and the `pi` executable available on `PATH`.
 ## Quick start
 
 ```bash
-# Create an isolated profile with persistent memory
+# Create an isolated profile that starts with your main Pi configuration
 pi-profile create coder
 
-# Add an opinionated instruction template
+# Add a focused instruction template on top of the same familiar setup
 pi-profile create researcher --template research
 
 # Inspect and select a default
@@ -72,11 +72,11 @@ Pi chooses its agent directory during startup. Profiles therefore cannot be swit
 ```text
 ~/.pi/profiles/coder/
 ├── profile.json                 # pi-profile metadata
-├── settings.json                # native Pi settings
+├── settings.json                # snapshot of main Pi settings
 ├── auth.json                    # shared symlink or private file
 ├── models.json                  # shared symlink or private file
-├── AGENTS.md                    # present when a persona template is used
-├── APPEND_SYSTEM.md             # present when a persona template is used
+├── AGENTS.md                    # present when an instruction template is used
+├── APPEND_SYSTEM.md             # present when an instruction template is used
 ├── extensions/
 │   └── pi-profile-memory.ts     # typed persistent-memory integration
 ├── skills/
@@ -90,7 +90,11 @@ Pi chooses its agent directory during startup. Profiles therefore cannot be swit
     └── FAILURES.md              # recurring failure modes
 ```
 
-The default profile is intentionally blank in personality: it receives native Pi directories and memory, but no `AGENTS.md` or `APPEND_SYSTEM.md`. Choose `--template coding`, `research`, or `personal` to seed profile-specific instructions.
+A new profile copies the main Pi operational setup that users expect: `settings.json`, `keybindings.json`, loose extensions, skills, prompts, themes, tools, and managed binaries. The copied `sessionDir` is reset to the profile's own `sessions/` directory. Package declarations in settings are preserved; Pi restores missing npm or git packages in the profile on launch instead of `pi-profile` duplicating potentially large package installations. That first restoration may require network access.
+
+Identity and state start fresh. Main Pi's `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, trust decisions, sessions, and memory are not inherited. The default profile is therefore familiar in capability but blank in personality. Choose `--template coding`, `research`, or `personal` to seed profile-specific instructions.
+
+Copied settings and loose resources are independent snapshots, so users can customize or remove them inside the profile without changing main Pi. Top-level resource-directory symlinks are materialized for the same reason; symlinks nested inside a resource keep their original targets. Authentication and custom model definitions remain live-shared by default as described below.
 
 ## Persistent memory
 
@@ -118,29 +122,39 @@ pi-profile create assistant --template personal
 pi-profile create clean --template blank
 ```
 
-Templates only seed instruction files. Pi's native `AGENTS.md` and `APPEND_SYSTEM.md` loading gives those files behavior.
+Templates are intentionally small identity and workflow starting points. They only seed `AGENTS.md` and `APPEND_SYSTEM.md`; they do not install models, skills, extensions, prompts, or themes. Pi's native instruction loading gives those files behavior.
+
+An explicitly selected template replaces cloned profile instruction files. `--template blank` clears `AGENTS.md`, `SYSTEM.md`, and `APPEND_SYSTEM.md`. Without an explicit template, `--from <profile>` preserves that profile's instructions.
+
+For a task-specific agent, create the closest starting point and then edit its instruction files. For example, Pi can create a `security-review` profile from the research template and tailor `AGENTS.md` with the desired review scope and output format.
 
 ## Clone behavior
 
-Clone configuration, instructions, and resources while starting with fresh sessions and fresh memory:
+Normal creation already starts from main Pi's operational configuration:
 
 ```bash
-pi-profile create work --from coder
+pi-profile create work
 ```
 
-Copy memory too:
-
-```bash
-pi-profile create coder-backup --from coder --clone-all
-```
-
-Create from the normal `~/.pi/agent` configuration:
+`--from-base` remains as an explicit equivalent for scripts and clarity:
 
 ```bash
 pi-profile create work --from-base
 ```
 
-`--clone-all` copies profile memory, but session history remains fresh. Sessions are intentionally not copied by either mode.
+Clone another profile's configuration, instructions, and resources while starting with fresh sessions and fresh memory:
+
+```bash
+pi-profile create work --from coder
+```
+
+Copy that profile's memory too:
+
+```bash
+pi-profile create coder-backup --from coder --clone-all
+```
+
+`--clone-all` requires `--from` or explicit `--from-base`. Session history is always fresh.
 
 ## Authentication and models
 
@@ -162,7 +176,7 @@ pi-profile client /login
 
 ## Workspace
 
-Profiles normally preserve the directory from which `pi-profile` is launched. To bind a profile to one project:
+Profiles normally preserve the directory from which `pi-profile` is launched. The workspace passed at creation must already exist and be a directory. To bind a profile to one project:
 
 ```bash
 pi-profile create project-agent --workspace /absolute/path/to/project
