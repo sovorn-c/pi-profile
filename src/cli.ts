@@ -24,7 +24,7 @@ const VERSION = (
 // Pi subcommands that can be run directly against the default profile without
 // an explicit profile name. `list` is intentionally excluded because
 // `pi-profile list` already lists profiles.
-const PI_SUBCOMMANDS = new Set(["install", "remove", "config"]);
+const PI_SUBCOMMANDS = new Set(["install", "remove", "config", "update"]);
 
 function usage(): string {
   return `Usage:

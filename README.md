@@ -41,16 +41,23 @@ Requirements: Node.js 18+ and the `pi` executable available on `PATH`.
 
 ## Updating
 
-`pi-profile` ships in two places: the global npm CLI launcher and the Pi package resource that provides the in-agent skill. Update both after a release:
+`pi-profile` ships in two places: the global npm CLI launcher and the Pi package resource that provides the in-agent skill. Update both after a release from your shell, not from inside an interactive Pi session:
 
 ```bash
 # Update the global launcher
 npm update -g @sovorn/pi-profile
 
-# Update the Pi package resource from inside any profile
-pi-profile coder
-# inside Pi:
-pi install npm:@sovorn/pi-profile
+# Update the Pi package resource inside a profile
+pi-profile coder update --extensions
+
+# Or update Pi itself plus all packages in a profile
+pi-profile coder update --all
+```
+
+For the default profile you can omit the profile name:
+
+```bash
+pi-profile update --extensions
 ```
 
 Verify the CLI version:
@@ -58,8 +65,6 @@ Verify the CLI version:
 ```bash
 pi-profile --version
 ```
-
-Then run `pi list` inside a profile to confirm the updated skill loaded.
 
 ## Quick start
 
