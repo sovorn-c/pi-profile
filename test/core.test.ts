@@ -28,7 +28,7 @@ test('creates profile with template, layout, settings and memory files', () => {
     assert.equal(fs.statSync(path.join(dir, sub)).isDirectory(), true);
   }
   assert.deepEqual(readJson(path.join(dir, 'settings.json')), {
-    skills: ['skills'], prompts: ['prompts'], extensions: ['extensions'], themes: ['themes'], sessionDir: 'sessions'
+    skills: ['skills'], prompts: ['prompts'], extensions: ['extensions'], themes: ['themes'], sessionDir: path.join(dir, 'sessions')
   });
   assert.match(fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8'), /focused coding agent/);
   assert.match(fs.readFileSync(path.join(dir, 'memory', 'HINDSIGHT.md'), 'utf8'), /Hindsight/);
@@ -74,7 +74,7 @@ test('default creation inherits main Pi configuration but starts with fresh iden
   const profile = createProfile('work', { home });
   assert.deepEqual(readJson(path.join(profile.dir, 'settings.json')), {
     ...inheritedSettings,
-    sessionDir: 'sessions'
+    sessionDir: path.join(profile.dir, 'sessions')
   });
   assert.deepEqual(readJson(path.join(profile.dir, 'keybindings.json')), { 'app.quit': 'ctrl+q' });
   for (const [sub, file] of [

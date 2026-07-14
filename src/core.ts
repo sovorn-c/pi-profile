@@ -247,10 +247,13 @@ function copyFileIfMissing(source: fs.PathLike, destination: string): void {
   if (!fs.existsSync(destination)) fs.copyFileSync(source, destination);
 }
 
-function ensureProfileSettings(dir: string): void {
-  const file = path.join(dir, "settings.json");
+function ensureProfileSettings(settingsDir: string, profileDir: string): void {
+  const file = path.join(settingsDir, "settings.json");
   if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, `${JSON.stringify(SETTINGS, null, 2)}\n`);
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({ ...SETTINGS, sessionDir: path.join(profileDir, "sessions") }, null, 2)}\n`,
+    );
     return;
   }
   let settings: Record<string, unknown>;
@@ -261,7 +264,9 @@ function ensureProfileSettings(dir: string): void {
   } catch {
     throw new Error(`Invalid settings.json inherited from ${file}`);
   }
-  settings.sessionDir = "sessions";
+  // Use an absolute path so sessions stay inside the profile regardless of the
+  // workspace or current working directory Pi is launched from.
+  settings.sessionDir = path.join(profileDir, "sessions");
   fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
@@ -395,7 +400,7 @@ export function createProfile(
     for (const sub of ["skills", "prompts", "extensions", "tools", "themes", "sessions"]) {
       fs.mkdirSync(path.join(stagingDir, sub), { recursive: true });
     }
-    ensureProfileSettings(stagingDir);
+    ensureProfileSettings(stagingDir, dir);
 
     // A template is an identity overlay, not a resource bundle. Cloning another
     // profile preserves its instructions unless the user explicitly selects a
