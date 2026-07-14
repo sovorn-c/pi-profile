@@ -96,6 +96,8 @@ Identity and state start fresh. Main Pi's `AGENTS.md`, `SYSTEM.md`, `APPEND_SYST
 
 Copied settings and loose resources are independent snapshots, so users can customize or remove them inside the profile without changing main Pi. Top-level resource-directory symlinks are materialized for the same reason; symlinks nested inside a resource keep their original targets. Authentication and custom model definitions remain live-shared by default as described below.
 
+A directory such as `extensions/<package>/` that contains only `config.json` is package configuration, not a separate extension installation.
+
 ## Persistent memory
 
 Memory is implemented by the generated TypeScript extension at `extensions/pi-profile-memory.ts`, not merely by creating Markdown files. For the active profile, it:
@@ -200,6 +202,8 @@ pi-profile create <name>
 pi-profile list [--json]
 pi-profile show <name> [--json]
 pi-profile dir <name> [--json]
+pi-profile resources <name> [--json]
+pi-profile doctor <name> [--json]
 pi-profile default [<name>] [--json]
 pi-profile current [--json]
 pi-profile delete <name> --force [--json]
@@ -215,6 +219,43 @@ pi-profile -p "Summarize this repository"
 
 `pi-profile shell` prints optional shell helper functions such as `pi_coder`.
 
+## Running Pi commands against a profile
+
+Because a profile is just a Pi agent directory, any Pi subcommand can be targeted at a profile by launching it first:
+
+```bash
+pi-profile coder list
+pi-profile coder install npm:some-package
+pi-profile coder remove npm:some-package
+pi-profile coder config ...
+```
+
+For the configured default profile, `install`, `remove`, and `config` can be run directly without naming the profile:
+
+```bash
+pi-profile install npm:some-package
+pi-profile remove npm:some-package
+pi-profile config ...
+```
+
+(`pi-profile list` without a profile name still lists profiles.)
+
+## Inspecting and validating profiles
+
+`pi-profile resources` reports the authoritative inventory for a profile: declared packages, loose extensions, skills, prompts, themes, tools, config-only extension directories, and installed-but-undeclared packages.
+
+```bash
+pi-profile resources coder
+pi-profile resources coder --json
+```
+
+`pi-profile doctor` validates `settings.json` and reports missing or stale packages. It exits with a non-zero status when errors are found.
+
+```bash
+pi-profile doctor coder
+pi-profile doctor coder --json
+```
+
 ## JSON output
 
 Management commands support machine-readable output:
@@ -224,6 +265,8 @@ pi-profile list --json
 pi-profile show coder --json
 pi-profile current --json
 pi-profile dir coder --json
+pi-profile resources coder --json
+pi-profile doctor coder --json
 ```
 
 ## Development
