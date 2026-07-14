@@ -17,6 +17,44 @@ Profiles are selected before Pi starts. You cannot switch the profile of the cur
 pi-profile <name>
 ```
 
+## Mandatory profile scope protocol
+
+When the user asks about or wants to change a specific profile, follow this protocol before any read, write, deletion, or package operation:
+
+1. Confirm the active profile by reading `PI_CODING_AGENT_DIR` from the environment or by running `pi-profile current`.
+2. Verify that directory resolves to `~/.pi/profiles/<expected-name>/`. If it does not, stop and tell the user which profile is actually active.
+3. Restrict every operation to that profile directory. Do not inspect or modify `~/.pi/agent/`, `~/.agents/`, sibling profiles, or other global Pi state unless the user explicitly asks.
+4. Use Pi's native commands for package and resource management from inside the launched profile:
+   - `pi list`
+   - `pi install npm:<package>`
+   - `pi remove npm:<package>`
+   - `pi config ...`
+   Do not manually edit `settings.json` package declarations, because that leaves stale npm files, lockfiles, and configuration directories behind.
+5. If you must run a single Pi command against a profile without entering an interactive session, you can either:
+   - Launch the profile and run the command:
+     ```bash
+     pi-profile coder
+     # inside Pi:
+     pi list
+     pi install npm:some-package
+     pi remove npm:some-package
+     ```
+   - Or prefix with `PI_CODING_AGENT_DIR`:
+     ```bash
+     PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi list
+     ```
+   - For the default profile, `pi-profile` also accepts `install`, `remove`, and `config` directly:
+     ```bash
+     pi-profile install npm:some-package
+     pi-profile remove npm:some-package
+     pi-profile config ...
+     ```
+6. After any mutation:
+   - validate `settings.json`;
+   - run `pi list` inside the profile;
+   - list profile-local resources to confirm the expected change;
+   - tell the user to run `/reload` in Pi if a session is active.
+
 ## Common commands
 
 ```bash
@@ -37,6 +75,25 @@ pi-profile coder /login
 pi-profile current
 pi-profile dir coder
 pi-profile delete coder --force
+
+# Run Pi commands against a named profile
+pi-profile coder list
+pi-profile coder install npm:some-package
+pi-profile coder remove npm:some-package
+
+# Run Pi package commands against the default profile
+# (pi-profile list without a profile name still lists profiles)
+pi-profile install npm:some-package
+pi-profile remove npm:some-package
+
+# Inspect a profile's resources and health
+pi-profile resources coder
+pi-profile resources coder --json
+pi-profile doctor coder
+pi-profile doctor coder --json
+
+# Run one command against a profile from outside
+PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi list
 ```
 
 ## Profile contents
@@ -53,6 +110,8 @@ Main Pi identity and state do not carry over: `AGENTS.md`, `SYSTEM.md`, `APPEND_
 - `extensions/pi-profile-memory.ts`
 
 The memory extension loads bounded profile memory into prompts, provides `profile_memory` for durable classified entries, and records a bounded outcome after the agent fully settles. It is profile-local and does not generate or update skills. Memory is copied only by `--clone-all`.
+
+A directory such as `extensions/<package>/` that contains only `config.json` is package configuration, not a separate extension installation. Do not treat configuration-only directories as duplicate or leftover extensions.
 
 ## Task-specific profiles
 
@@ -93,3 +152,7 @@ pi-profile <name> /login
 - Keep `--from`, `--clone-all`, `--own-auth`, and `--own-models` for users who explicitly need advanced behavior.
 - Explain that profiles isolate Pi state, not workspace filesystem access or sandbox permissions.
 - Do not claim that a skill or extension can migrate the current Pi process to another agent directory.
+- For package and resource changes, prefer launching the profile and using `pi install`, `pi remove`, and `pi config` rather than hand-editing `settings.json` or filesystem paths.
+- After mutating a profile's configuration or resources, validate `settings.json`, run `pi list`, inspect profile-local resources, and remind the user to run `/reload` if Pi is already running.
+- Use `pi-profile resources <name>` to get an authoritative inventory of declared packages, loose resources, config-only extension directories, and stale installed-but-undeclared packages.
+- Use `pi-profile doctor <name>` to surface missing packages, stale packages, and invalid settings. Treat `doctor` warnings as things to review, not always as things to delete.

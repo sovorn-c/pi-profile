@@ -6,7 +6,8 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
   createProfile, validateName, listProfiles, setDefaultProfile, getDefaultProfile,
-  deleteProfile, currentProfile, shellHelpers, launchSpec, profileDir, showProfile
+  deleteProfile, currentProfile, shellHelpers, launchSpec, profileDir, showProfile,
+  profileResources, profileDoctor
 } from '../src/core.js';
 
 function tempHome(): string {
@@ -336,4 +337,115 @@ test('cli emits json and forwards default profile args to pi', () => {
   r = spawnSync(process.execPath, [cli, '-p', 'hello'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home, PATH: `${binDir}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(readJson(capture), { args: ['-p', 'hello'], dir: path.join(home, '.pi', 'profiles', 'coder') });
+});
+
+test('profileResources reports declared, missing, and stale packages plus loose resources', () => {
+  const home = tempHome();
+  const profile = createProfile('coder', { home, memory: false });
+  const dir = profile.dir;
+
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({
+    skills: ['skills'], prompts: ['prompts'], extensions: ['extensions'], themes: ['themes'],
+    sessionDir: 'sessions',
+    packages: [
+      'npm:declared-npm',
+      { source: 'git:github.com/owner/repo' },
+      'npm:missing-npm'
+    ]
+  }, null, 2));
+
+  fs.mkdirSync(path.join(dir, 'npm'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'npm', 'package.json'), JSON.stringify({
+    name: 'pi-extensions', private: true,
+    dependencies: {
+      'declared-npm': '^1.0.0',
+      'stale-npm': '^1.0.0'
+    }
+  }));
+
+  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'repo'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'stale'), { recursive: true });
+
+  fs.writeFileSync(path.join(dir, 'extensions', 'loose.ts'), '// loose');
+  fs.mkdirSync(path.join(dir, 'extensions', 'declared-npm'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'extensions', 'declared-npm', 'config.json'), '{}');
+
+  const resources = profileResources('coder', { home });
+  assert.deepEqual(resources.packages.declared.map((p) => p.source), [
+    'npm:declared-npm', 'git:github.com/owner/repo', 'npm:missing-npm'
+  ]);
+  assert.deepEqual(resources.packages.missing.map((p) => p.source), ['npm:missing-npm']);
+  assert.deepEqual(resources.packages.stale.map((p) => p.source), [
+    'npm:stale-npm', 'git:github.com/owner/stale'
+  ]);
+  assert.deepEqual(resources.extensions.loose, ['loose.ts']);
+  assert.deepEqual(resources.extensions.configOnly, ['declared-npm']);
+});
+
+test('profileDoctor reports invalid settings and package mismatches', () => {
+  const home = tempHome();
+  const profile = createProfile('coder', { home });
+  const dir = profile.dir;
+
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({
+    skills: ['skills'], prompts: ['prompts'], extensions: ['extensions'], themes: ['themes'],
+    sessionDir: 'sessions',
+    packages: ['npm:missing-npm']
+  }, null, 2));
+
+  fs.mkdirSync(path.join(dir, 'npm'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'npm', 'package.json'), JSON.stringify({
+    name: 'pi-extensions', private: true,
+    dependencies: { 'stale-npm': '^1.0.0' }
+  }));
+
+  fs.mkdirSync(path.join(dir, 'extensions', 'stale-npm'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'extensions', 'stale-npm', 'config.json'), '{}');
+
+  const diagnosis = profileDoctor('coder', { home });
+  assert.equal(diagnosis.ok, false);
+  assert.ok(diagnosis.issues.some((i) => i.severity === 'error' && i.message.includes('missing-npm')));
+  assert.ok(diagnosis.issues.some((i) => i.severity === 'warning' && i.message.includes('stale-npm')));
+  assert.ok(diagnosis.issues.some((i) => i.severity === 'info' && i.message.includes('Configuration-only')));
+});
+
+test('cli resources and doctor emit json', () => {
+  const home = tempHome();
+  const cli = path.resolve('dist/cli.js');
+  let r = spawnSync(process.execPath, [cli, 'create', 'coder', '--json'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+
+  r = spawnSync(process.execPath, [cli, 'resources', 'coder', '--json'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const resources = JSON.parse(r.stdout) as { name: string; packages: { declared: unknown[] } };
+  assert.equal(resources.name, 'coder');
+  assert.ok(Array.isArray(resources.packages.declared));
+
+  r = spawnSync(process.execPath, [cli, 'doctor', 'coder', '--json'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const diagnosis = JSON.parse(r.stdout) as { name: string; ok: boolean };
+  assert.equal(diagnosis.name, 'coder');
+  assert.equal(diagnosis.ok, true);
+});
+
+test('cli forwards install remove config subcommands to default profile', () => {
+  const home = tempHome();
+  const cli = path.resolve('dist/cli.js');
+  let r = spawnSync(process.execPath, [cli, 'create', 'coder', '--json'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  r = spawnSync(process.execPath, [cli, 'default', 'coder'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+
+  const binDir = path.join(home, 'bin');
+  fs.mkdirSync(binDir);
+  const capture = path.join(home, 'capture.json');
+  fs.writeFileSync(path.join(binDir, 'pi'), `#!/usr/bin/env node\nconst fs=require('fs');fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({args:process.argv.slice(2), dir:process.env.PI_CODING_AGENT_DIR}));\n`, { mode: 0o755 });
+
+  r = spawnSync(process.execPath, [cli, 'install', 'npm:foo'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home, PATH: `${binDir}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(capture), { args: ['install', 'npm:foo'], dir: path.join(home, '.pi', 'profiles', 'coder') });
+
+  r = spawnSync(process.execPath, [cli, 'remove', 'npm:foo'], { cwd: path.resolve('.'), env: { ...process.env, PI_PROFILE_HOME: home, PATH: `${binDir}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(capture), { args: ['remove', 'npm:foo'], dir: path.join(home, '.pi', 'profiles', 'coder') });
 });

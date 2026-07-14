@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -157,6 +158,45 @@ export interface LaunchSpec {
   env: Environment;
   cwd?: string;
   profile: ResolvedProfile;
+}
+
+export interface ProfilePackage {
+  source: string;
+  kind: "npm" | "git";
+  id: string;
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+}
+
+export interface ProfileResources {
+  name: string;
+  dir: string;
+  packages: {
+    declared: ProfilePackage[];
+    missing: ProfilePackage[];
+    stale: ProfilePackage[];
+  };
+  extensions: {
+    loose: string[];
+    looseDirs: string[];
+    configOnly: string[];
+  };
+  skills: string[];
+  prompts: string[];
+  themes: string[];
+  tools: string[];
+}
+
+export interface DoctorIssue {
+  severity: "error" | "warning" | "info";
+  message: string;
+  path?: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isTemplateName(value: string): value is TemplateName {
@@ -545,6 +585,260 @@ export function shellHelpers(opts: HomeOptions = {}): string {
     .join("\n")}\n`;
 }
 
+function readSettings(dir: string): Record<string, unknown> | null {
+  const file = path.join(dir, "settings.json");
+  if (!fs.existsSync(file)) return null;
+  try {
+    const value = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function parsePackageEntry(entry: unknown): ProfilePackage | null {
+  let source: string | undefined;
+  let extensions: string[] | undefined;
+  let skills: string[] | undefined;
+  let prompts: string[] | undefined;
+  let themes: string[] | undefined;
+
+  if (typeof entry === "string") {
+    source = entry;
+  } else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    const obj = entry as Record<string, unknown>;
+    if (typeof obj.source === "string") source = obj.source;
+    if (Array.isArray(obj.extensions)) extensions = obj.extensions as string[];
+    if (Array.isArray(obj.skills)) skills = obj.skills as string[];
+    if (Array.isArray(obj.prompts)) prompts = obj.prompts as string[];
+    if (Array.isArray(obj.themes)) themes = obj.themes as string[];
+  }
+
+  if (!source) return null;
+  if (source.startsWith("npm:")) {
+    return { source, kind: "npm", id: source.slice(4), extensions, skills, prompts, themes };
+  }
+  if (source.startsWith("git:")) {
+    return { source, kind: "git", id: source.slice(4), extensions, skills, prompts, themes };
+  }
+  return null;
+}
+
+function parseDeclaredPackages(dir: string): ProfilePackage[] {
+  const settings = readSettings(dir);
+  const packages = settings?.packages;
+  if (!Array.isArray(packages)) return [];
+  return packages.map(parsePackageEntry).filter((p): p is ProfilePackage => p !== null);
+}
+
+function installedNpmPackages(dir: string): string[] {
+  // Prefer npm/package.json dependencies because node_modules contains every
+  // transitive dependency; scanning it would report valid deps as stale.
+  const packageJsonPath = path.join(dir, "npm", "package.json");
+  if (fs.existsSync(packageJsonPath)) {
+    try {
+      const value = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const deps = (value as Record<string, unknown>).dependencies;
+        if (deps && typeof deps === "object" && !Array.isArray(deps)) {
+          return Object.keys(deps).sort();
+        }
+      }
+    } catch {
+      // fall through to node_modules scan
+    }
+  }
+
+  const npmDir = path.join(dir, "npm", "node_modules");
+  if (!fs.existsSync(npmDir)) return [];
+  const result: string[] = [];
+  for (const entry of fs.readdirSync(npmDir)) {
+    if (entry === ".bin" || entry === "package-lock.json" || entry.startsWith(".")) continue;
+    const entryPath = path.join(npmDir, entry);
+    const stat = fs.statSync(entryPath);
+    if (stat.isDirectory()) {
+      if (entry.startsWith("@")) {
+        for (const sub of fs.readdirSync(entryPath)) {
+          const subPath = path.join(entryPath, sub);
+          if (fs.statSync(subPath).isDirectory()) {
+            result.push(`${entry}/${sub}`);
+          }
+        }
+      } else {
+        result.push(entry);
+      }
+    }
+  }
+  return result.sort();
+}
+
+function installedGitPackages(dir: string): string[] {
+  const gitDir = path.join(dir, "git");
+  if (!fs.existsSync(gitDir)) return [];
+  const result: string[] = [];
+  for (const host of fs.readdirSync(gitDir)) {
+    const hostPath = path.join(gitDir, host);
+    if (!fs.statSync(hostPath).isDirectory() || host.startsWith(".")) continue;
+    for (const owner of fs.readdirSync(hostPath)) {
+      const ownerPath = path.join(hostPath, owner);
+      if (!fs.statSync(ownerPath).isDirectory() || owner.startsWith(".")) continue;
+      for (const repo of fs.readdirSync(ownerPath)) {
+        const repoPath = path.join(ownerPath, repo);
+        if (fs.statSync(repoPath).isDirectory() && !repo.startsWith(".")) {
+          result.push(`${host}/${owner}/${repo}`);
+        }
+      }
+    }
+  }
+  return result.sort();
+}
+
+function scanDirEntries(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => !entry.name.startsWith("."))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function isConfigOnlyExtensionDir(dir: string, name: string): boolean {
+  const extDir = path.join(dir, "extensions", name);
+  if (!fs.existsSync(extDir) || !fs.statSync(extDir).isDirectory()) return false;
+  const entries = fs
+    .readdirSync(extDir)
+    .filter((entry) => !entry.startsWith("."));
+  return entries.length === 1 && entries[0] === "config.json";
+}
+
+export function profileResources(name: unknown, opts: HomeOptions = {}): ProfileResources {
+  const resolved = resolveProfileArg(name, opts);
+  const dir = resolved.dir;
+  const declared = parseDeclaredPackages(dir);
+  const declaredNpm = new Set(declared.filter((p) => p.kind === "npm").map((p) => p.id));
+  const declaredGit = new Set(declared.filter((p) => p.kind === "git").map((p) => p.id));
+
+  const installedNpm = installedNpmPackages(dir);
+  const installedGit = installedGitPackages(dir);
+
+  const missing = declared.filter((p) => {
+    if (p.kind === "npm") return !installedNpm.includes(p.id);
+    return !installedGit.includes(p.id);
+  });
+
+  const stale: ProfilePackage[] = [];
+  for (const id of installedNpm) {
+    if (!declaredNpm.has(id)) {
+      stale.push({ source: `npm:${id}`, kind: "npm", id });
+    }
+  }
+  for (const id of installedGit) {
+    if (!declaredGit.has(id)) {
+      stale.push({ source: `git:${id}`, kind: "git", id });
+    }
+  }
+
+  const extensionEntries = scanDirEntries(path.join(dir, "extensions"));
+  const loose: string[] = [];
+  const looseDirs: string[] = [];
+  const configOnly: string[] = [];
+  for (const entry of extensionEntries) {
+    const entryPath = path.join(dir, "extensions", entry);
+    const stat = fs.statSync(entryPath);
+    if (stat.isFile()) {
+      loose.push(entry);
+    } else if (stat.isDirectory()) {
+      if (isConfigOnlyExtensionDir(dir, entry)) {
+        configOnly.push(entry);
+      } else {
+        looseDirs.push(entry);
+      }
+    }
+  }
+
+  return {
+    name: resolved.name,
+    dir,
+    packages: {
+      declared,
+      missing,
+      stale,
+    },
+    extensions: { loose, looseDirs, configOnly },
+    skills: scanDirEntries(path.join(dir, "skills")),
+    prompts: scanDirEntries(path.join(dir, "prompts")),
+    themes: scanDirEntries(path.join(dir, "themes")),
+    tools: scanDirEntries(path.join(dir, "tools")),
+  };
+}
+
+export interface DoctorResult {
+  name: string;
+  dir: string;
+  ok: boolean;
+  issues: DoctorIssue[];
+}
+
+export function profileDoctor(name: unknown, opts: HomeOptions = {}): DoctorResult {
+  const resolved = resolveProfileArg(name, opts);
+  const dir = resolved.dir;
+  const issues: DoctorIssue[] = [];
+
+  const settings = readSettings(dir);
+  if (!settings) {
+    issues.push({
+      severity: "error",
+      message: "settings.json is missing or invalid JSON",
+      path: path.join(dir, "settings.json"),
+    });
+  } else if (!Array.isArray(settings.packages) && !("packages" in settings)) {
+    issues.push({
+      severity: "info",
+      message: "settings.json has no packages array; profile has no declared Pi packages",
+      path: path.join(dir, "settings.json"),
+    });
+  }
+
+  let resources: ProfileResources;
+  try {
+    resources = profileResources(name, opts);
+  } catch (error) {
+    issues.push({
+      severity: "error",
+      message: `Could not scan profile resources: ${errorMessage(error)}`,
+    });
+    return { name: resolved.name, dir, ok: false, issues };
+  }
+
+  for (const pkg of resources.packages.missing) {
+    issues.push({
+      severity: "error",
+      message: `Declared package is not installed: ${pkg.source}`,
+      path: pkg.kind === "npm" ? path.join(dir, "npm", "package.json") : path.join(dir, "git", pkg.id),
+    });
+  }
+
+  for (const pkg of resources.packages.stale) {
+    issues.push({
+      severity: "warning",
+      message: `Installed package is not declared in settings.json: ${pkg.source}`,
+      path: pkg.kind === "npm" ? path.join(dir, "npm", "package.json") : path.join(dir, "git", pkg.id),
+    });
+  }
+
+  for (const ext of resources.extensions.configOnly) {
+    issues.push({
+      severity: "info",
+      message: `Configuration-only extension directory: ${ext}`,
+      path: path.join(dir, "extensions", ext),
+    });
+  }
+
+  const hasErrors = issues.some((issue) => issue.severity === "error");
+  return { name: resolved.name, dir, ok: !hasErrors, issues };
+}
+
 export function launchSpec(
   name: unknown,
   piArgs: string[] = [],
@@ -565,4 +859,22 @@ export function launchSpec(
     ...(cwd ? { cwd } : {}),
     profile: resolved,
   };
+}
+
+export function runPi(spec: LaunchSpec): Promise<number> {
+  const child = spawn(spec.command, spec.args, {
+    stdio: "inherit",
+    env: spec.env,
+    ...(spec.cwd ? { cwd: spec.cwd } : {}),
+  });
+  return new Promise<number>((resolve) => {
+    child.on("error", (error) => {
+      console.error(error.message);
+      resolve(127);
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) process.kill(process.pid, signal);
+      resolve(code ?? 1);
+    });
+  });
 }

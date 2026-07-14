@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import {
   createProfile,
@@ -10,6 +9,7 @@ import {
   launchSpec,
   listProfiles,
   profileDir,
+  runPi,
   setDefaultProfile,
   shellHelpers,
   showProfile,
@@ -21,6 +21,11 @@ const VERSION = (
   }
 ).version;
 
+// Pi subcommands that can be run directly against the default profile without
+// an explicit profile name. `list` is intentionally excluded because
+// `pi-profile list` already lists profiles.
+const PI_SUBCOMMANDS = new Set(["install", "remove", "config"]);
+
 function usage(): string {
   return `Usage:
   pi-profile <profile> [...pi args]
@@ -29,6 +34,8 @@ function usage(): string {
   pi-profile list [--json]
   pi-profile show <name> [--json]
   pi-profile dir <name> [--json]
+  pi-profile resources <name> [--json]
+  pi-profile doctor <name> [--json]
   pi-profile delete <name> --force [--json]
   pi-profile default <name> [--json]
   pi-profile current [--json]
@@ -152,6 +159,36 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  if (cmd === "resources") {
+    const name = rest.find((arg) => arg !== "--json");
+    const { profileResources } = await import("./core.js");
+    const result = profileResources(name, { home });
+    print(result, json);
+    return 0;
+  }
+
+  if (cmd === "doctor") {
+    const name = rest.find((arg) => arg !== "--json");
+    const { profileDoctor } = await import("./core.js");
+    const result = profileDoctor(name, { home });
+    if (json) {
+      print(result, true);
+    } else {
+      const status = result.ok ? "ok" : "issues found";
+      console.log(`Profile: ${result.name}\nStatus: ${status}\n`);
+      if (result.issues.length === 0) {
+        console.log("No issues detected.");
+      } else {
+        for (const issue of result.issues) {
+          const prefix = issue.severity.toUpperCase();
+          const pathSuffix = issue.path ? `\n  ${issue.path}` : "";
+          console.log(`[${prefix}] ${issue.message}${pathSuffix}`);
+        }
+      }
+    }
+    return result.ok ? 0 : 1;
+  }
+
   if (cmd === "dir") {
     const name = rest.find((arg) => arg !== "--json");
     const dir = profileDir(name, home);
@@ -189,25 +226,17 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // Pi subcommands against the default profile: `pi-profile install npm:foo`
+  if (cmd && PI_SUBCOMMANDS.has(cmd)) {
+    const spec = launchSpec(undefined, argv, { home, env: process.env });
+    return runPi(spec);
+  }
+
   const usesDefaultProfile = !cmd || cmd.startsWith("-");
   const profileName = usesDefaultProfile ? undefined : cmd;
   const piArgs = usesDefaultProfile ? argv : rest;
   const spec = launchSpec(profileName, piArgs, { home, env: process.env });
-  const child = spawn(spec.command, spec.args, {
-    stdio: "inherit",
-    env: spec.env,
-    ...(spec.cwd ? { cwd: spec.cwd } : {}),
-  });
-  return new Promise<number>((resolve) => {
-    child.on("error", (error) => {
-      console.error(error.message);
-      resolve(127);
-    });
-    child.on("exit", (code, signal) => {
-      if (signal) process.kill(process.pid, signal);
-      resolve(code ?? 1);
-    });
-  });
+  return runPi(spec);
 }
 
 main(process.argv.slice(2))
