@@ -47,17 +47,10 @@ Requirements: Node.js 18+ and the `pi` executable available on `PATH`.
 # Update the global launcher
 npm update -g @sovorn/pi-profile
 
-# Update the Pi package resource inside a profile
-pi-profile coder update --extensions
-
-# Or update Pi itself plus all packages in a profile
-pi-profile coder update --all
-```
-
-For the default profile you can omit the profile name:
-
-```bash
-pi-profile update --extensions
+# Update the Pi package resource
+pi update --extensions             # update all packages
+# or
+pi update npm:@sovorn/pi-profile   # update just this package
 ```
 
 Verify the CLI version:
