@@ -39,6 +39,28 @@ Installing through Pi does not replace the global CLI installation above.
 
 Requirements: Node.js 18+ and the `pi` executable available on `PATH`.
 
+## Updating
+
+`pi-profile` ships in two places: the global npm CLI launcher and the Pi package resource that provides the in-agent skill. Update both after a release:
+
+```bash
+# Update the global launcher
+npm update -g @sovorn/pi-profile
+
+# Update the Pi package resource from inside any profile
+pi-profile coder
+# inside Pi:
+pi install npm:@sovorn/pi-profile
+```
+
+Verify the CLI version:
+
+```bash
+pi-profile --version
+```
+
+Then run `pi list` inside a profile to confirm the updated skill loaded.
+
 ## Quick start
 
 ```bash
@@ -218,6 +240,22 @@ pi-profile -p "Summarize this repository"
 ```
 
 `pi-profile shell` prints optional shell helper functions such as `pi_coder`.
+
+## Resuming sessions
+
+Sessions are stored inside the profile's own `sessions/` directory. To resume a previous conversation, pass Pi's `--session` flag together with the session ID:
+
+```bash
+pi-profile coder --session <session-id>
+```
+
+Session IDs are the filenames (without the `.jsonl` extension) found in:
+
+```text
+~/.pi/profiles/coder/sessions/
+```
+
+Sessions are scoped to the profile, so launching a different profile and passing the same session ID will not resume that conversation.
 
 ## Running Pi commands against a profile
 

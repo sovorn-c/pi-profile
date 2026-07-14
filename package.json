@@ -1,6 +1,6 @@
 {
   "name": "@sovorn/pi-profile",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Hermes-style isolated profiles with persistent memory for the Pi coding agent",
   "type": "module",
   "bin": {
