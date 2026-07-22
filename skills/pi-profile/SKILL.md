@@ -24,36 +24,31 @@ When the user asks about or wants to change a specific profile, follow this prot
 1. Confirm the active profile by reading `PI_CODING_AGENT_DIR` from the environment or by running `pi-profile current`.
 2. Verify that directory resolves to `~/.pi/profiles/<expected-name>/`. If it does not, stop and tell the user which profile is actually active.
 3. Restrict every operation to that profile directory. Do not inspect or modify `~/.pi/agent/`, `~/.agents/`, sibling profiles, or other global Pi state unless the user explicitly asks.
-4. Use Pi's native commands for package and resource management from inside the launched profile:
-   - `pi list`
-   - `pi install npm:<package>`
-   - `pi remove npm:<package>`
-   - `pi config ...`
-   Do not manually edit `settings.json` package declarations, because that leaves stale npm files, lockfiles, and configuration directories behind.
-5. If you must run a single Pi command against a profile without entering an interactive session, you can either:
-   - Launch the profile and run the command:
-     ```bash
-     pi-profile coder
-     # inside Pi:
-     pi list
-     pi install npm:some-package
-     pi remove npm:some-package
-     ```
-   - Or prefix with `PI_CODING_AGENT_DIR`:
-     ```bash
-     PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi list
-     ```
-   - For the default profile, `pi-profile` also accepts `install`, `remove`, and `config` directly:
-     ```bash
-     pi-profile install npm:some-package
-     pi-profile remove npm:some-package
-     pi-profile config ...
-     ```
+4. Use Pi's native package commands from the shell while targeting the profile:
+   ```bash
+   pi-profile coder list
+   pi-profile coder install npm:some-package
+   pi-profile coder remove npm:some-package
+   pi-profile coder config ...
+   ```
+   Do not tell users to launch interactive Pi and then type shell-level `pi` commands into the chat. Do not manually edit `settings.json` package declarations, because that leaves stale npm files, lockfiles, and configuration directories behind.
+5. An equivalent explicit form is:
+   ```bash
+   PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi list
+   PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi install npm:some-package
+   ```
+   For the configured default profile, `pi-profile` accepts `install`, `remove`, `config`, and `update` without a profile name:
+   ```bash
+   pi-profile install npm:some-package
+   pi-profile remove npm:some-package
+   pi-profile config ...
+   pi-profile update --extensions
+   ```
 6. After any mutation:
    - validate `settings.json`;
-   - run `pi list` inside the profile;
+   - run `pi-profile <name> list` from the shell;
    - list profile-local resources to confirm the expected change;
-   - tell the user to run `/reload` in Pi if a session is active.
+   - tell the user to run `/reload` if that profile already has an active Pi session.
 
 ## Common commands
 
@@ -98,7 +93,9 @@ PI_CODING_AGENT_DIR="$HOME/.pi/profiles/coder" pi list
 
 ## Profile contents
 
-Profiles live under `~/.pi/profiles/<name>/` and contain a native Pi agent directory plus metadata. Normal creation copies main Pi's `settings.json`, `keybindings.json`, loose extensions, skills, prompts, themes, tools, and managed binaries. The copied session directory is reset to profile-local `sessions/`. Package declarations remain in settings so Pi can restore missing package installations when the profile launches; the first restoration may require network access.
+Profiles live under `~/.pi/profiles/<name>/` and contain a native Pi agent directory plus metadata. Normal creation copies main Pi's `settings.json`, `keybindings.json`, loose extensions, skills, prompts, themes, tools, and managed binaries. The copied session directory is reset to profile-local `sessions/`.
+
+Inherited npm and git package declarations are materialized during creation through Pi's native package manager. When those package types are declared, the profile owns its `npm/package.json`, lockfile, `npm/node_modules`, and `git/` checkouts; installed packages are not shared with main Pi, sibling profiles, or device-global npm. npm's download cache may still be shared. Creation may require network access and fails atomically if an inherited remote package cannot be installed. Local-path package declarations keep Pi's native reference semantics and are not copied. Inherited relative local paths are rebased to their equivalent absolute source paths so cloning does not change what they reference.
 
 Main Pi identity and state do not carry over: `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, trust decisions, sessions, and memory start fresh. The default template is blank in personality but has persistent memory; `coding`, `research`, and `personal` additionally seed Pi instruction files:
 

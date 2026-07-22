@@ -103,6 +103,8 @@ Pi chooses its agent directory during startup. Profiles therefore cannot be swit
 ├── prompts/
 ├── themes/
 ├── tools/
+├── npm/                         # created when inherited npm packages exist
+├── git/                         # created when inherited git packages exist
 ├── sessions/
 └── memory/
     ├── USER.md                  # durable user preferences
@@ -110,7 +112,11 @@ Pi chooses its agent directory during startup. Profiles therefore cannot be swit
     └── FAILURES.md              # recurring failure modes
 ```
 
-A new profile copies the main Pi operational setup that users expect: `settings.json`, `keybindings.json`, loose extensions, skills, prompts, themes, tools, and managed binaries. The copied `sessionDir` is reset to the profile's own `sessions/` directory. Package declarations in settings are preserved; Pi restores missing npm or git packages in the profile on launch instead of `pi-profile` duplicating potentially large package installations. That first restoration may require network access.
+A new profile copies the main Pi operational setup that users expect: `settings.json`, `keybindings.json`, loose extensions, skills, prompts, themes, tools, and managed binaries. The copied `sessionDir` is reset to the profile's own `sessions/` directory.
+
+Package declarations are preserved and materialized during creation with Pi's native package manager. When those package types are declared, the profile receives its own `npm/package.json`, lockfile, `npm/node_modules`, and `git/` checkouts instead of resolving packages from main Pi or a device-global npm installation. Package downloads may use npm's shared cache, but the installed state remains profile-local. Creation may require network access and fails atomically if an inherited remote package cannot be materialized; an incomplete profile is not left behind.
+
+Local-path Pi package declarations remain references to their external paths, matching Pi's native package semantics. They are not copied into the profile; inherited relative paths are rewritten to the equivalent absolute source path so cloning does not change their meaning.
 
 Identity and state start fresh. Main Pi's `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, trust decisions, sessions, and memory are not inherited. The default profile is therefore familiar in capability but blank in personality. Choose `--template coding`, `research`, or `personal` to seed profile-specific instructions.
 
@@ -257,7 +263,7 @@ Sessions are scoped to the profile, so launching a different profile and passing
 
 ## Running Pi commands against a profile
 
-Because a profile is just a Pi agent directory, any Pi subcommand can be targeted at a profile by launching it first:
+Because a profile is a Pi agent directory, Pi subcommands can be forwarded to it directly from the shell:
 
 ```bash
 pi-profile coder list
@@ -266,12 +272,13 @@ pi-profile coder remove npm:some-package
 pi-profile coder config ...
 ```
 
-For the configured default profile, `install`, `remove`, and `config` can be run directly without naming the profile:
+For the configured default profile, `install`, `remove`, `config`, and `update` can be run without naming the profile:
 
 ```bash
 pi-profile install npm:some-package
 pi-profile remove npm:some-package
 pi-profile config ...
+pi-profile update --extensions
 ```
 
 (`pi-profile list` without a profile name still lists profiles.)

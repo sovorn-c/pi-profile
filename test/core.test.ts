@@ -18,6 +18,52 @@ function tempHome(): string {
 
 function readJson<T = unknown>(file: string): T { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; }
 
+function fakePiInstaller(home: string): { command: string[]; log: string } {
+  const script = path.join(home, 'fake-pi.cjs');
+  const log = path.join(home, 'package-installs.jsonl');
+  fs.writeFileSync(script, `
+const fs = require('node:fs');
+const path = require('node:path');
+const [command, source] = process.argv.slice(2);
+if (command !== 'install' || !source) process.exit(2);
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ source, agentDir }) + '\\n');
+if (source.startsWith('npm:')) {
+  const spec = source.slice(4);
+  const slash = spec.indexOf('/');
+  const versionAt = spec.startsWith('@') ? spec.indexOf('@', slash + 1) : spec.indexOf('@');
+  const name = versionAt > 0 ? spec.slice(0, versionAt) : spec;
+  const npmDir = path.join(agentDir, 'npm');
+  const packageFile = path.join(npmDir, 'package.json');
+  fs.mkdirSync(path.join(npmDir, 'node_modules', name), { recursive: true });
+  const pkg = fs.existsSync(packageFile)
+    ? JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+    : { name: 'pi-extensions', private: true, dependencies: {} };
+  pkg.dependencies ||= {};
+  pkg.dependencies[name] = '*';
+  fs.writeFileSync(packageFile, JSON.stringify(pkg, null, 2));
+  fs.writeFileSync(path.join(npmDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3 }));
+} else {
+  let spec = source.startsWith('git:') && !source.startsWith('git://') ? source.slice(4) : source;
+  let id;
+  const scp = spec.match(/^git@([^:]+):(.+)$/);
+  if (scp) {
+    id = scp[1] + '/' + scp[2];
+  } else if (spec.includes('://')) {
+    const url = new URL(spec);
+    id = url.hostname + '/' + url.pathname.replace(/^\\/+/, '');
+  } else {
+    id = spec;
+  }
+  const refAt = id.indexOf('@');
+  if (refAt !== -1) id = id.slice(0, refAt);
+  id = id.replace(/\\.git$/, '');
+  fs.mkdirSync(path.join(agentDir, 'git', id, '.git'), { recursive: true });
+}
+`);
+  return { command: [process.execPath, script], log };
+}
+
 test('creates profile with template, layout, settings and memory files', () => {
   const home = tempHome();
   const result = createProfile('coder', { home, template: 'coding' });
@@ -41,7 +87,7 @@ test('default creation inherits main Pi configuration but starts with fresh iden
     defaultProvider: 'anthropic',
     defaultModel: 'claude-sonnet',
     defaultThinkingLevel: 'medium',
-    packages: ['npm:example-package'],
+    packages: ['npm:@sovorn/pi-profile'],
     skills: ['skills'],
     extensions: ['extensions'],
     sessionDir: '/tmp/main-pi-sessions'
@@ -71,7 +117,8 @@ test('default creation inherits main Pi configuration but starts with fresh iden
   fs.mkdirSync(path.join(agent, 'memory'), { recursive: true });
   fs.writeFileSync(path.join(agent, 'memory', 'USER.md'), 'main memory');
 
-  const profile = createProfile('work', { home });
+  const fakePi = fakePiInstaller(home);
+  const profile = createProfile('work', { home, piCommand: fakePi.command });
   assert.deepEqual(readJson(path.join(profile.dir, 'settings.json')), {
     ...inheritedSettings,
     sessionDir: path.join(profile.dir, 'sessions')
@@ -87,7 +134,16 @@ test('default creation inherits main Pi configuration but starts with fresh iden
   ]) {
     assert.equal(fs.readFileSync(path.join(profile.dir, sub, file), 'utf8'), sub);
   }
-  assert.equal(fs.existsSync(path.join(profile.dir, 'npm')), false);
+  assert.deepEqual(readJson<{ dependencies: Record<string, string> }>(path.join(profile.dir, 'npm', 'package.json')).dependencies, {
+    '@sovorn/pi-profile': '*'
+  });
+  assert.equal(fs.existsSync(path.join(profile.dir, 'npm', 'package-lock.json')), true);
+  assert.equal(fs.existsSync(path.join(profile.dir, 'npm', 'node_modules', '@sovorn', 'pi-profile')), true);
+  assert.equal(fs.existsSync(path.join(profile.dir, 'npm', 'large-package', 'marker')), false);
+  const installs = fs.readFileSync(fakePi.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { source: string; agentDir: string });
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0].source, 'npm:@sovorn/pi-profile');
+  assert.match(path.basename(installs[0].agentDir), /^\.work-/);
   for (const file of ['AGENTS.md', 'SYSTEM.md', 'APPEND_SYSTEM.md', 'trust.json']) {
     assert.equal(fs.existsSync(path.join(profile.dir, file)), false);
   }
@@ -96,6 +152,92 @@ test('default creation inherits main Pi configuration but starts with fresh iden
 
   fs.rmSync(path.join(profile.dir, 'extensions', 'main-extension.ts'));
   assert.equal(fs.existsSync(path.join(agent, 'extensions', 'main-extension.ts')), true);
+});
+
+test('profile clones freshly materialize inherited npm and git packages', () => {
+  const home = tempHome();
+  const source = createProfile('source-packages', { home });
+  const packages = [
+    { source: 'npm:@scope/tool@1.2.3', skills: [] },
+    'git:github.com/owner/repo@feature/test',
+    'git:git+ssh://git@github.com/owner/other.git#feature/test',
+    '/absolute/shared/package',
+    './relative-shared-package',
+    'bare-relative-package',
+    { source: '../filtered-local-package', extensions: [], skills: ['skills/**'] },
+    { source: '.\\windows-relative-package', prompts: [] }
+  ];
+  fs.writeFileSync(path.join(source.dir, 'settings.json'), JSON.stringify({ packages }, null, 2));
+
+  const fakePi = fakePiInstaller(home);
+  const clone = createProfile('cloned-packages', { home, from: 'source-packages', piCommand: fakePi.command });
+  assert.deepEqual(readJson<{ packages: unknown[] }>(path.join(clone.dir, 'settings.json')).packages, [
+    packages[0],
+    packages[1],
+    packages[2],
+    packages[3],
+    path.join(source.dir, 'relative-shared-package'),
+    path.join(source.dir, 'bare-relative-package'),
+    {
+      source: path.resolve(source.dir, '../filtered-local-package'),
+      extensions: [],
+      skills: ['skills/**']
+    },
+    {
+      source: path.resolve(source.dir, '.\\windows-relative-package'),
+      prompts: []
+    }
+  ]);
+  const installs = fs.readFileSync(fakePi.log, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { source: string });
+  assert.deepEqual(installs.map((entry) => entry.source), [
+    'npm:@scope/tool@1.2.3',
+    'git:github.com/owner/repo@feature/test',
+    'git:git+ssh://git@github.com/owner/other.git#feature/test'
+  ]);
+  assert.equal(fs.existsSync(path.join(clone.dir, 'npm', 'node_modules', '@scope', 'tool')), true);
+  assert.equal(fs.existsSync(path.join(clone.dir, 'git', 'github.com', 'owner', 'repo')), true);
+  assert.equal(fs.existsSync(path.join(clone.dir, 'git', 'github.com', 'owner', 'other')), true);
+  assert.deepEqual(profileResources('cloned-packages', { home }).packages.missing, []);
+});
+
+test('package materialization failure leaves profile creation atomic', () => {
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  fs.writeFileSync(path.join(agent, 'settings.json'), JSON.stringify({ packages: ['npm:unavailable-package'] }));
+
+  assert.throws(
+    () => createProfile('failed-packages', {
+      home,
+      piCommand: [process.execPath, '-e', "process.stderr.write('package unavailable');process.exit(2)"],
+    }),
+    /Could not materialize inherited package npm:unavailable-package: package unavailable/
+  );
+  assert.equal(fs.existsSync(path.join(home, '.pi', 'profiles', 'failed-packages')), false);
+  assert.deepEqual(
+    fs.readdirSync(path.join(home, '.pi', 'profiles')).filter((entry) => entry.startsWith('.failed-packages-')),
+    []
+  );
+});
+
+test('package materialization errors redact credentials', () => {
+  const home = tempHome();
+  const agent = path.join(home, '.pi', 'agent');
+  const source = 'git:https://user:secret@example.com/owner/repo?token=private-token';
+  fs.writeFileSync(path.join(agent, 'settings.json'), JSON.stringify({ packages: [source] }));
+
+  let message = '';
+  try {
+    createProfile('secret-failure', {
+      home,
+      piCommand: [process.execPath, '-e', "process.stderr.write(process.argv.at(-1));process.exit(2)"],
+    });
+    assert.fail('Expected package materialization to fail');
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  assert.match(message, /\*\*\*/);
+  assert.doesNotMatch(message, /user:secret|private-token/);
+  assert.equal(fs.existsSync(path.join(home, '.pi', 'profiles', 'secret-failure')), false);
 });
 
 test('materializes linked top-level resources so profile changes stay isolated', () => {
@@ -160,7 +302,10 @@ test('profile clones preserve identity unless an explicit template replaces it',
 
 test('validates names and rejects traversal/reserved command names', () => {
   for (const good of ['coder', 'research_1', 'x.y-z']) assert.equal(validateName(good), good);
-  for (const bad of ['', '../x', 'a/b', 'a\\b', '~me', 'a..b', 'create', 'list', 'bad name']) {
+  for (const bad of [
+    '', '../x', 'a/b', 'a\\b', '~me', 'a..b', 'create', 'list', 'resources', 'doctor',
+    'install', 'remove', 'config', 'update', 'bad name'
+  ]) {
     assert.throws(() => validateName(bad));
   }
 });
@@ -363,8 +508,8 @@ test('profileResources reports declared, missing, and stale packages plus loose 
     }
   }));
 
-  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'repo'), { recursive: true });
-  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'stale'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'repo', '.git'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'git', 'github.com', 'owner', 'stale', '.git'), { recursive: true });
 
   fs.writeFileSync(path.join(dir, 'extensions', 'loose.ts'), '// loose');
   fs.mkdirSync(path.join(dir, 'extensions', 'declared-npm'), { recursive: true });

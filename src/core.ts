@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crossSpawn from "cross-spawn";
 
 export const RESERVED_NAMES = new Set([
   "create",
@@ -12,6 +13,12 @@ export const RESERVED_NAMES = new Set([
   "current",
   "shell",
   "show",
+  "resources",
+  "doctor",
+  "install",
+  "remove",
+  "config",
+  "update",
   "rename",
   "export",
   "import",
@@ -115,6 +122,8 @@ export interface CreateProfileOptions extends HomeOptions {
   memory?: boolean;
   ownAuth?: boolean;
   ownModels?: boolean;
+  /** Command used to materialize inherited packages. Defaults to the platform Pi executable. */
+  piCommand?: readonly string[];
 }
 
 export type FileMode = "own" | "symlink" | "copy" | "skipped";
@@ -307,6 +316,104 @@ function copySelectedEntries(source: string, destination: string, entries: reado
   }
 }
 
+function packageEntrySource(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    const source = (entry as Record<string, unknown>).source;
+    return typeof source === "string" ? source : null;
+  }
+  return null;
+}
+
+function isRemotePackageSource(source: string): boolean {
+  const value = source.trim();
+  return (
+    value.startsWith("npm:") ||
+    value.startsWith("git:") ||
+    value.startsWith("http:") ||
+    value.startsWith("https:") ||
+    value.startsWith("ssh:")
+  );
+}
+
+function rebaseInheritedLocalPackages(settingsDir: string, sourceDir: string): void {
+  const settings = readSettings(settingsDir);
+  if (!settings || !Array.isArray(settings.packages)) return;
+
+  let changed = false;
+  settings.packages = settings.packages.map((entry) => {
+    const source = packageEntrySource(entry);
+    if (!source) return entry;
+    const value = source.trim();
+    const isHomeRelative = value === "~" || value.startsWith("~/") || value.startsWith("~\\");
+    if (
+      isRemotePackageSource(value) ||
+      value.startsWith("file:") ||
+      isHomeRelative ||
+      path.isAbsolute(value) ||
+      path.win32.isAbsolute(value)
+    ) {
+      return entry;
+    }
+    changed = true;
+    const absoluteSource = path.resolve(sourceDir, value);
+    return typeof entry === "string"
+      ? absoluteSource
+      : { ...(entry as Record<string, unknown>), source: absoluteSource };
+  });
+
+  if (changed) {
+    fs.writeFileSync(path.join(settingsDir, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
+  }
+}
+
+function inheritedManagedPackageSources(dir: string): string[] {
+  const settings = readSettings(dir);
+  if (!settings || !Array.isArray(settings.packages)) return [];
+
+  const sources = settings.packages
+    .map(packageEntrySource)
+    .filter((source): source is string => source !== null)
+    .filter(isRemotePackageSource);
+
+  return [...new Set(sources)];
+}
+
+function redactPackageOutput(value: string): string {
+  return value
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi, "$1***@")
+    .replace(/([?&](?:access_token|auth|key|password|token)=)[^&\s]+/gi, "$1***");
+}
+
+function materializeInheritedPackages(dir: string, piCommand?: readonly string[]): void {
+  const sources = inheritedManagedPackageSources(dir);
+  if (sources.length === 0) return;
+  const effectiveCommand = piCommand ?? [process.platform === "win32" ? "pi.cmd" : "pi"];
+  if (effectiveCommand.length === 0) throw new Error("Pi command cannot be empty");
+
+  const [command, ...commandArgs] = effectiveCommand;
+  for (const source of sources) {
+    const result = crossSpawn.sync(command, [...commandArgs, "install", source], {
+      cwd: dir,
+      env: { ...process.env, PI_CODING_AGENT_DIR: dir },
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const safeSource = redactPackageOutput(source);
+    if (result.error) {
+      throw new Error(
+        `Could not materialize inherited package ${safeSource}: ${redactPackageOutput(result.error.message)}`,
+      );
+    }
+    if (result.status !== 0) {
+      const detail = redactPackageOutput(`${result.stderr || ""}\n${result.stdout || ""}`.trim());
+      throw new Error(
+        `Could not materialize inherited package ${safeSource}${detail ? `: ${detail}` : ""}`,
+      );
+    }
+  }
+}
+
 function applyTemplate(dir: string, templateName: TemplateName): void {
   for (const file of IDENTITY_FILES) fs.rmSync(path.join(dir, file), { force: true });
   if (templateName === "blank") return;
@@ -401,6 +508,10 @@ export function createProfile(
       fs.mkdirSync(path.join(stagingDir, sub), { recursive: true });
     }
     ensureProfileSettings(stagingDir, dir);
+    rebaseInheritedLocalPackages(stagingDir, source);
+    // Explicit installs bypass Pi's legacy global npm fallback and guarantee that
+    // inherited package declarations are backed by this profile's own npm/git store.
+    materializeInheritedPackages(stagingDir, opts.piCommand);
 
     // A template is an identity overlay, not a resource bundle. Cloning another
     // profile preserves its instructions unless the user explicitly selects a
@@ -602,6 +713,49 @@ function readSettings(dir: string): Record<string, unknown> | null {
   }
 }
 
+function npmPackageId(source: string): string {
+  const spec = source.slice(4);
+  if (spec.startsWith("@")) {
+    const slash = spec.indexOf("/");
+    if (slash === -1) return spec;
+    const versionAt = spec.indexOf("@", slash + 1);
+    return versionAt === -1 ? spec : spec.slice(0, versionAt);
+  }
+  const versionAt = spec.indexOf("@");
+  return versionAt === -1 ? spec : spec.slice(0, versionAt);
+}
+
+function gitPackageId(source: string): string {
+  let spec = source.trim();
+  if (spec.startsWith("git:") && !spec.startsWith("git://")) spec = spec.slice(4).trim();
+
+  let host = "";
+  let repositoryPath = "";
+  const sshMatch = spec.match(/^git@([^:]+):(.+)$/);
+  if (sshMatch) {
+    host = sshMatch[1];
+    repositoryPath = sshMatch[2];
+  } else if (/^(https?|ssh|git|git\+ssh):\/\//.test(spec)) {
+    try {
+      const url = new URL(spec);
+      host = url.hostname;
+      repositoryPath = url.pathname.replace(/^\/+/, "");
+    } catch {
+      return source;
+    }
+  } else {
+    const slash = spec.indexOf("/");
+    if (slash === -1) return spec;
+    host = spec.slice(0, slash);
+    repositoryPath = spec.slice(slash + 1);
+  }
+
+  const refAt = repositoryPath.indexOf("@");
+  if (refAt !== -1) repositoryPath = repositoryPath.slice(0, refAt);
+  repositoryPath = repositoryPath.replace(/\.git$/, "");
+  return `${host}/${repositoryPath}`;
+}
+
 function parsePackageEntry(entry: unknown): ProfilePackage | null {
   let source: string | undefined;
   let extensions: string[] | undefined;
@@ -622,10 +776,15 @@ function parsePackageEntry(entry: unknown): ProfilePackage | null {
 
   if (!source) return null;
   if (source.startsWith("npm:")) {
-    return { source, kind: "npm", id: source.slice(4), extensions, skills, prompts, themes };
+    return { source, kind: "npm", id: npmPackageId(source), extensions, skills, prompts, themes };
   }
-  if (source.startsWith("git:")) {
-    return { source, kind: "git", id: source.slice(4), extensions, skills, prompts, themes };
+  if (
+    source.startsWith("git:") ||
+    source.startsWith("http://") ||
+    source.startsWith("https://") ||
+    source.startsWith("ssh://")
+  ) {
+    return { source, kind: "git", id: gitPackageId(source), extensions, skills, prompts, themes };
   }
   return null;
 }
@@ -682,20 +841,19 @@ function installedGitPackages(dir: string): string[] {
   const gitDir = path.join(dir, "git");
   if (!fs.existsSync(gitDir)) return [];
   const result: string[] = [];
-  for (const host of fs.readdirSync(gitDir)) {
-    const hostPath = path.join(gitDir, host);
-    if (!fs.statSync(hostPath).isDirectory() || host.startsWith(".")) continue;
-    for (const owner of fs.readdirSync(hostPath)) {
-      const ownerPath = path.join(hostPath, owner);
-      if (!fs.statSync(ownerPath).isDirectory() || owner.startsWith(".")) continue;
-      for (const repo of fs.readdirSync(ownerPath)) {
-        const repoPath = path.join(ownerPath, repo);
-        if (fs.statSync(repoPath).isDirectory() && !repo.startsWith(".")) {
-          result.push(`${host}/${owner}/${repo}`);
-        }
-      }
+
+  const visit = (current: string, relativeParts: string[]): void => {
+    if (fs.existsSync(path.join(current, ".git"))) {
+      result.push(relativeParts.join("/"));
+      return;
     }
-  }
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      visit(path.join(current, entry.name), [...relativeParts, entry.name]);
+    }
+  };
+
+  visit(gitDir, []);
   return result.sort();
 }
 
